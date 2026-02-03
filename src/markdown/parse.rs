@@ -15,7 +15,7 @@ use comrak::{
     parse_document,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fmt::{self, Debug, Display},
     mem,
 };
@@ -47,16 +47,18 @@ impl Default for ParserOptions {
 pub struct MarkdownParser<'a> {
     arena: &'a Arena<'a>,
     options: comrak::Options<'static>,
+    link_counter: Cell<u32>,
 }
 
 impl<'a> MarkdownParser<'a> {
     /// Construct a new markdown parser.
     pub fn new(arena: &'a Arena<'a>) -> Self {
-        Self { arena, options: ParserOptions::default().0 }
+        Self { arena, options: ParserOptions::default().0, link_counter: Cell::new(0) }
     }
 
     /// Parse the contents of a markdown file.
     pub(crate) fn parse(&self, contents: &str) -> ParseResult<Vec<MarkdownElement>> {
+        self.link_counter.set(0);
         let node = parse_document(self.arena, contents, &self.options);
         let mut elements = Vec::new();
         for node in node.children() {
@@ -68,6 +70,7 @@ impl<'a> MarkdownParser<'a> {
 
     /// Parse inlines in a markdown input.
     pub(crate) fn parse_inlines(&self, line: &str) -> Result<Line<RawColor>, ParseInlinesError> {
+        self.link_counter.set(0);
         let node = parse_document(self.arena, line, &self.options);
         if node.children().count() == 0 {
             return Ok(Default::default());
@@ -80,7 +83,7 @@ impl<'a> MarkdownParser<'a> {
         let NodeValue::Paragraph = &data.value else {
             return Err(ParseInlinesError("inline must be simple text".into()));
         };
-        let parser = InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::No);
+        let parser = InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::No, &self.link_counter);
         let inlines = parser.parse(node).map_err(|e| ParseInlinesError(e.to_string()))?;
         let mut output = Line::default();
         for inline in inlines {
@@ -144,7 +147,8 @@ impl<'a> MarkdownParser<'a> {
 
     fn parse_block_quote(&self, node: &'a AstNode<'a>) -> ParseResult<MarkdownElement> {
         let mut lines = Vec::new();
-        let inlines = InlinesParser::new(self.arena, SoftBreak::Newline, StringifyImages::Yes).parse(node)?;
+        let inlines =
+            InlinesParser::new(self.arena, SoftBreak::Newline, StringifyImages::Yes, &self.link_counter).parse(node)?;
         for inline in inlines {
             match inline {
                 Inline::Text(text) => lines.push(text),
@@ -180,7 +184,8 @@ impl<'a> MarkdownParser<'a> {
         node: &'a AstNode<'a>,
     ) -> ParseResult<MarkdownElement> {
         let mut line = vec![Text::new(definition.name.clone(), TextStyle::default().superscript())];
-        let inlines = InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::Yes).parse(node)?;
+        let inlines =
+            InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::Yes, &self.link_counter).parse(node)?;
         for inline in inlines {
             match inline {
                 Inline::Text(text) => line.extend(text.0),
@@ -202,7 +207,8 @@ impl<'a> MarkdownParser<'a> {
 
     fn parse_paragraph(&self, node: &'a AstNode<'a>) -> ParseResult<Vec<MarkdownElement>> {
         let mut elements = Vec::new();
-        let inlines = InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::No).parse(node)?;
+        let inlines =
+            InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::No, &self.link_counter).parse(node)?;
         let mut paragraph_elements = Vec::new();
         for inline in inlines {
             match inline {
@@ -227,7 +233,8 @@ impl<'a> MarkdownParser<'a> {
     }
 
     fn parse_exheading(&self, node: &'a AstNode<'a>) -> ParseResult<Vec<Line<RawColor>>> {
-        let inlines = InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::No).parse(node)?;
+        let inlines =
+            InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::No, &self.link_counter).parse(node)?;
         let mut lines = Vec::new();
         let mut chunks = Vec::new();
         for inline in inlines {
@@ -248,7 +255,8 @@ impl<'a> MarkdownParser<'a> {
     }
 
     fn parse_text(&self, node: &'a AstNode<'a>) -> ParseResult<Line<RawColor>> {
-        let inlines = InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::No).parse(node)?;
+        let inlines =
+            InlinesParser::new(self.arena, SoftBreak::Space, StringifyImages::No, &self.link_counter).parse(node)?;
         let mut chunks = Vec::new();
         for inline in inlines {
             match inline {
@@ -361,17 +369,29 @@ enum StringifyImages {
     No,
 }
 
-struct InlinesParser<'a> {
+struct InlinesParser<'a, 'b> {
     inlines: Vec<Inline>,
     pending_text: Vec<Text<RawColor>>,
     arena: &'a Arena<'a>,
     soft_break: SoftBreak,
     stringify_images: StringifyImages,
+    link_counter: &'b Cell<u32>,
 }
 
-impl<'a> InlinesParser<'a> {
-    fn new(arena: &'a Arena<'a>, soft_break: SoftBreak, stringify_images: StringifyImages) -> Self {
-        Self { inlines: Vec::new(), pending_text: Vec::new(), arena, soft_break, stringify_images }
+impl<'a, 'b> InlinesParser<'a, 'b> {
+    fn new(
+        arena: &'a Arena<'a>,
+        soft_break: SoftBreak,
+        stringify_images: StringifyImages,
+        link_counter: &'b Cell<u32>,
+    ) -> Self {
+        Self { inlines: Vec::new(), pending_text: Vec::new(), arena, soft_break, stringify_images, link_counter }
+    }
+
+    fn next_link_id(&self) -> u32 {
+        let id = self.link_counter.get();
+        self.link_counter.set(id + 1);
+        id
     }
 
     fn parse(mut self, node: &'a AstNode<'a>) -> ParseResult<Vec<Inline>> {
@@ -414,12 +434,16 @@ impl<'a> InlinesParser<'a> {
                 };
             }
             NodeValue::Link(link) => {
+                let link_id = self.next_link_id();
                 let has_label = node.first_child().is_some();
                 if has_label {
                     self.process_children(node, TextStyle::default().link_label())?;
                     self.pending_text.push(Text::from(" ("));
                 }
-                self.pending_text.push(Text::new(link.url.clone(), TextStyle::default().link_url()));
+                self.pending_text.push(Text::new(
+                    link.url.clone(),
+                    TextStyle::default().link_url().with_link_id(link_id),
+                ));
                 if !link.title.is_empty() {
                     self.pending_text.push(Text::from(" \""));
                     self.pending_text.push(Text::new(link.title.clone(), TextStyle::default().link_title()));
@@ -430,7 +454,11 @@ impl<'a> InlinesParser<'a> {
                 }
             }
             NodeValue::WikiLink(link) => {
-                self.pending_text.push(Text::new(link.url.clone(), TextStyle::default().link_url()));
+                let link_id = self.next_link_id();
+                self.pending_text.push(Text::new(
+                    link.url.clone(),
+                    TextStyle::default().link_url().with_link_id(link_id),
+                ));
             }
             NodeValue::LineBreak => {
                 self.store_pending_text();
@@ -778,8 +806,10 @@ boop
     fn link_wo_label_wo_title() {
         let parsed = parse_single("my [](https://example.com)");
         let MarkdownElement::Paragraph(elements) = parsed else { panic!("not a paragraph: {parsed:?}") };
-        let expected_chunks =
-            vec![Text::from("my "), Text::new("https://example.com", TextStyle::default().link_url())];
+        let expected_chunks = vec![
+            Text::from("my "),
+            Text::new("https://example.com", TextStyle::default().link_url().with_link_id(0)),
+        ];
 
         let expected_elements = &[Line(expected_chunks)];
         assert_eq!(elements, expected_elements);
@@ -793,7 +823,7 @@ boop
             Text::from("my "),
             Text::new("website", TextStyle::default().link_label()),
             Text::from(" ("),
-            Text::new("https://example.com", TextStyle::default().link_url()),
+            Text::new("https://example.com", TextStyle::default().link_url().with_link_id(0)),
             Text::from(")"),
         ];
 
@@ -807,7 +837,7 @@ boop
         let MarkdownElement::Paragraph(elements) = parsed else { panic!("not a paragraph: {parsed:?}") };
         let expected_chunks = vec![
             Text::from("my "),
-            Text::new("https://example.com", TextStyle::default().link_url()),
+            Text::new("https://example.com", TextStyle::default().link_url().with_link_id(0)),
             Text::from(" \""),
             Text::new("Example", TextStyle::default().link_title()),
             Text::from("\""),
@@ -825,7 +855,7 @@ boop
             Text::from("my "),
             Text::new("website", TextStyle::default().link_label()),
             Text::from(" ("),
-            Text::new("https://example.com", TextStyle::default().link_url()),
+            Text::new("https://example.com", TextStyle::default().link_url().with_link_id(0)),
             Text::from(" \""),
             Text::new("Example", TextStyle::default().link_title()),
             Text::from("\""),
@@ -840,7 +870,7 @@ boop
     fn wikilink_wo_title() {
         let parsed = parse_single("[[https://example.com]]");
         let MarkdownElement::Paragraph(elements) = parsed else { panic!("not a paragraph: {parsed:?}") };
-        let expected_chunks = vec![Text::new("https://example.com", TextStyle::default().link_url())];
+        let expected_chunks = vec![Text::new("https://example.com", TextStyle::default().link_url().with_link_id(0))];
 
         let expected_elements = &[Line(expected_chunks)];
         assert_eq!(elements, expected_elements);

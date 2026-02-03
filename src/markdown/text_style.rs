@@ -15,11 +15,12 @@ pub(crate) struct TextStyle<C = Color> {
     flags: u8,
     pub(crate) colors: Colors<C>,
     pub(crate) size: u8,
+    pub(crate) link_id: Option<u32>,
 }
 
 impl<C> Default for TextStyle<C> {
     fn default() -> Self {
-        Self { flags: Default::default(), colors: Default::default(), size: 1 }
+        Self { flags: Default::default(), colors: Default::default(), size: 1, link_id: None }
     }
 }
 
@@ -76,6 +77,12 @@ where
         self.italics().underlined()
     }
 
+    /// Attach a link id to this style.
+    pub(crate) fn with_link_id(mut self, link_id: u32) -> Self {
+        self.link_id = Some(link_id);
+        self
+    }
+
     /// Indicate this is a superscript.
     pub(crate) fn superscript(self) -> Self {
         self.add_flag(TextFormatFlags::Superscript)
@@ -120,6 +127,9 @@ where
         self.size = self.size.max(other.size);
         self.colors.background = self.colors.background.clone().or(other.colors.background.clone());
         self.colors.foreground = self.colors.foreground.clone().or(other.colors.foreground.clone());
+        if self.link_id.is_none() {
+            self.link_id = other.link_id;
+        }
     }
 
     /// Return a new style merged with the one passed in.
@@ -175,7 +185,7 @@ impl TextStyle<Color> {
             background: self.colors.background.map(Into::into),
             foreground: self.colors.foreground.map(Into::into),
         };
-        TextStyle { flags: self.flags, colors, size: self.size }
+        TextStyle { flags: self.flags, colors, size: self.size, link_id: self.link_id }
     }
 
     /// Iterate all attributes in this style.
@@ -192,7 +202,7 @@ impl TextStyle<Color> {
 impl TextStyle<RawColor> {
     pub(crate) fn resolve(&self, palette: &ColorPalette) -> Result<TextStyle, UndefinedPaletteColorError> {
         let colors = self.colors.resolve(palette)?;
-        Ok(TextStyle { flags: self.flags, colors, size: self.size })
+        Ok(TextStyle { flags: self.flags, colors, size: self.size, link_id: self.link_id })
     }
 }
 

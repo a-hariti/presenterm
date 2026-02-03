@@ -15,6 +15,7 @@ use crate::{
     tools::ThirdPartyTools,
 };
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -37,19 +38,26 @@ struct HtmlSlide {
 
 impl HtmlSlide {
     fn new(grid: TerminalGrid) -> Result<Self, ExportError> {
+        let link_targets = Self::build_link_targets(&grid);
         let mut rows = Vec::new();
         rows.push(String::from("<div class=\"container\">"));
         for (y, row) in grid.rows.into_iter().enumerate() {
             let mut finalized_row = "<div class=\"content-line\"><pre>".to_string();
             let mut current_style = row.first().map(|c| c.style).unwrap_or_default();
+            let mut current_link_id = row.first().and_then(|c| c.style.link_id);
             let mut current_string = String::new();
             let mut x = 0;
             while x < row.len() {
-                let c = row[x];
-                if c.style != current_style {
-                    finalized_row.push_str(&Self::finalize_string(&current_string, &current_style));
+                let c = &row[x];
+                if c.style != current_style || c.style.link_id != current_link_id {
+                    finalized_row.push_str(&Self::finalize_string(
+                        &current_string,
+                        &current_style,
+                        current_link_id.and_then(|id| link_targets.get(&id).map(String::as_str)),
+                    ));
                     current_string = String::new();
                     current_style = c.style;
+                    current_link_id = c.style.link_id;
                 }
                 match c.character {
                     '<' => current_string.push_str("&lt;"),
@@ -68,7 +76,11 @@ impl HtmlSlide {
                 x += c.style.size as usize;
             }
             if !current_string.is_empty() {
-                finalized_row.push_str(&Self::finalize_string(&current_string, &current_style));
+                finalized_row.push_str(&Self::finalize_string(
+                    &current_string,
+                    &current_style,
+                    current_link_id.and_then(|id| link_targets.get(&id).map(String::as_str)),
+                ));
             }
             finalized_row.push_str("</pre></div>");
             rows.push(finalized_row);
@@ -78,8 +90,19 @@ impl HtmlSlide {
         Ok(HtmlSlide { rows, background_color: grid.background_color.as_ref().map(color_to_html) })
     }
 
-    fn finalize_string(s: &str, style: &TextStyle) -> String {
-        HtmlText::new(s, style, FontSize::Pixels(FONT_SIZE)).to_string()
+    fn finalize_string(s: &str, style: &TextStyle, link: Option<&str>) -> String {
+        HtmlText::new(s, style, link, FontSize::Pixels(FONT_SIZE)).to_string()
+    }
+
+    fn build_link_targets(grid: &TerminalGrid) -> HashMap<u32, String> {
+        let mut targets: HashMap<u32, String> = HashMap::new();
+        for row in &grid.rows {
+            for cell in row {
+                let Some(link_id) = cell.style.link_id else { continue };
+                targets.entry(link_id).or_default().push(cell.character);
+            }
+        }
+        targets
     }
 }
 
@@ -170,6 +193,11 @@ impl ExportRenderer {
 
         span {{
             display: inline-block;
+        }}
+
+        a {{
+            color: inherit;
+            text-decoration: inherit;
         }}
 
         {font_face} 

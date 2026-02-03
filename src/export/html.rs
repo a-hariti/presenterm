@@ -4,12 +4,17 @@ use std::{borrow::Cow, fmt};
 pub(crate) enum HtmlText {
     Plain(String),
     Styled { text: String, style: String },
+    Linked { text: String, style: Option<String>, href: String },
 }
 
 impl HtmlText {
-    pub(crate) fn new(text: &str, style: &TextStyle, font_size: FontSize) -> Self {
+    pub(crate) fn new(text: &str, style: &TextStyle, link: Option<&str>, font_size: FontSize) -> Self {
         let mut text = text.to_string();
         if style == &TextStyle::default() {
+            if let Some(link) = link {
+                let href = escape_html_attribute(link);
+                return Self::Linked { text, style: None, href };
+            }
             return Self::Plain(text);
         }
         let mut css_styles = Vec::new();
@@ -40,7 +45,10 @@ impl HtmlText {
             css_styles.push(format!("font-size: {font_size}").into());
         }
         let css_style = css_styles.join("; ");
-        Self::Styled { text, style: css_style }
+        match link {
+            Some(link) => Self::Linked { text, style: Some(css_style), href: escape_html_attribute(link) },
+            None => Self::Styled { text, style: css_style },
+        }
     }
 }
 
@@ -49,6 +57,10 @@ impl fmt::Display for HtmlText {
         match self {
             Self::Plain(text) => write!(f, "{text}"),
             Self::Styled { text, style } => write!(f, "<span style=\"{style}\">{text}</span>"),
+            Self::Linked { text, style: None, href } => write!(f, "<a href=\"{href}\">{text}</a>"),
+            Self::Linked { text, style: Some(style), href } => {
+                write!(f, "<a href=\"{href}\"><span style=\"{style}\">{text}</span></a>")
+            }
         }
     }
 }
@@ -87,6 +99,14 @@ pub(crate) fn color_to_html(color: &Color) -> String {
     }
 }
 
+fn escape_html_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -107,17 +127,18 @@ mod test {
     #[case::background_color(TextStyle::default().bg_color(Color::new(1,2,3)), "background-color: #010203")]
     #[case::font_size(TextStyle::default().size(3), "font-size: 6px")]
     fn html_text(#[case] style: TextStyle, #[case] expected_style: &str) {
-        let html_text = HtmlText::new("", &style, FontSize::Pixels(2));
+        let html_text = HtmlText::new("", &style, None, FontSize::Pixels(2));
         let style = match &html_text {
             HtmlText::Plain(_) => "",
             HtmlText::Styled { style, .. } => style,
+            HtmlText::Linked { style, .. } => style.as_deref().unwrap_or(""),
         };
         assert_eq!(style, expected_style);
     }
 
     #[test]
     fn render_span() {
-        let html_text = HtmlText::new("hi", &TextStyle::default().bold(), FontSize::Pixels(1));
+        let html_text = HtmlText::new("hi", &TextStyle::default().bold(), None, FontSize::Pixels(1));
         let rendered = html_text.to_string();
         assert_eq!(rendered, "<span style=\"font-weight: bold\">hi</span>");
     }
